@@ -34,7 +34,7 @@ class Replica:
         print('Replica ' + str(self.id) + ' sent ' + str(message))
         self.socket.sendto(json.dumps(message).encode('utf-8'), ('localhost', self.port))
 
-    def send_heart(self):
+    def send_heartbeat(self):
         msg = {'src': self.id, 'dst': 'FFFF', 
                 'leader': self.id, 
                 "type": "append-entries", 
@@ -61,11 +61,45 @@ class Replica:
                 msg = json.loads(data.decode('utf-8'))
                 print("Received message '%s'" % (msg,), flush=True)    
                 
+                ### MESSAGE OPTIONS ###
+                if msg['type'] == 'append-entries': # receive heartbeat
+                    last_heartbeat = time.time()
+                    self.curr_leader = msg['leader']
+                    looking_for_votes = False
+                    votes = 0
+
+                elif msg['type'] == 'request_rpc': # vote for rpc
+                    msg = {'src': self.id, 'dst': msg['src'], 
+                            'leader': 'FFFF', 
+                            "type": "vote"}
+                    self.send(msg)
+                    sent_vote_for_term = True
+                
+                elif msg['type'] == 'vote': # increment votes and see if i make quorum
+                    votes += 1
+                    if votes >= (math.floor(len(self.others)/2) + 1):
+                        msg = {'src': self.id, 'dst': 'FFFF', 
+                            'leader': self.id, 
+                            "type": "append-entries", 
+                            'term': curr_term_number}
+                        self.send(msg)
+                        looking_for_votes = False
+                        votes = 0
+                        self.state = State.LEADER
+
                 if time.time() - last_heartbeat > timeout:
                     if self.state == State.LEADER:
                         self.send_heartbeat()
                     else:
-                        self.election_protocol()
+                        self.state = State.CANDIDATE
+                        curr_term_number += 1
+                        msg = {'src': self.id, 'dst': 'FFFF', 
+                                'leader': 'FFFF', 
+                                "type": "request_rpc", 
+                                'log-length': len(self.database)}
+                        votes += 1
+                        self.send(msg)
+                        looking_for_votes = True
 
                 if msg['type'] == 'put':
                     mid = msg['MID']
@@ -74,49 +108,6 @@ class Replica:
                 elif msg['type'] == 'get':
                     response = {"src": self.id, "dst": msg['src'], "leader": self.curr_leader, "type": "fail", "MID": mid}
                     self.send(response)
-
-
-
-                # if we recieve a heartbeat, continue on
-                if msg['type'] == 'append_entries':
-                    self.curr_leader = msg['leader']
-                    looking_for_votes = False
-                    votes = 0
-
-                # otherwise, go into candidate mode
-                else:
-                    self.state = State.CANDIDATE
-                    curr_term_number += 1
-
-                    # if we get a request_rpc, vote for them
-                    if msg['type'] == 'request_rpc':
-                        msg = {'src': self.id, 'dst': msg['src'], 
-                            'leader': 'FFFF', 
-                            "type": "vote"}
-                        self.send(msg)
-                        sent_vote_for_term = True
-
-                    # otherwise, send out a request rpc (should we not send out a vote if we already sent out a request rpc)
-                    else:
-                        msg = {'src': self.id, 'dst': 'FFFF', 
-                                'leader': 'FFFF', 
-                                "type": "request_rpc", 
-                                'log-length': len(self.database)}
-                        vote += 1
-                        self.send(msg)
-                        looking_for_votes = True
-                
-                    if looking_for_votes and msg['type'] == 'vote':
-                        votes += 1
-                        if votes >= (math.floor(len(self.others)/2) + 1):
-                            msg = {'src': self.id, 'dst': 'FFFF', 
-                                'leader': self.id, 
-                                "type": "append-entries", 
-                                'term': curr_term_number}
-                            self.send(msg)
-                            looking_for_votes = False
-                            votes = 0
-                            self.state = State.LEADER
 
 
 
