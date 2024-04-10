@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-import argparse, socket, time, json, select, struct, sys, math, os
+import argparse, socket, time, json, select, struct, sys, math, os, random
 from enum import Enum
 
 class State(Enum):
@@ -9,6 +9,7 @@ class State(Enum):
     FOLLOWER = 2
 
 BROADCAST = "FFFF"
+STANDARD_TIMEOUT = 0.15
 # STATE = {'candidate', 'follower', 'leader'}
 
 class Replica:
@@ -18,9 +19,8 @@ class Replica:
         self.id = id
         self.others = others
         self.state = State.FOLLOWER
-    
-        if id == '0000':
-            self.state = State.LEADER
+        self.curr_leader = 'FFFF'
+        self.curr_term_number = 0
 
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(('localhost', 0))
@@ -30,26 +30,95 @@ class Replica:
         self.send(hello)
         print("Sent hello message: %s" % hello, flush=True)
 
-
     def send(self, message):
         print('Replica ' + str(self.id) + ' sent ' + str(message))
         self.socket.sendto(json.dumps(message).encode('utf-8'), ('localhost', self.port))
 
+    def send_heart(self):
+        msg = {'src': self.id, 'dst': 'FFFF', 
+                'leader': self.id, 
+                "type": "append-entries", 
+                'term': self.curr_term_number}
+        self.send(msg)
+
     def run(self):
+        curr_term_number = 0
+        votes = 0
+        looking_for_votes = False
+        sent_vote_for_term = False
+        last_heartbeat = time.time()
         while True:
-            data, addr = self.socket.recvfrom(65535)
-            msg = json.loads(data.decode('utf-8'))
-            print("Received message '%s'" % (msg,), flush=True)            
+
+            # use time in python instead of setting select for the timeout
+            # track the last time we sent a heartbeat/recieved a heartbeat
+            timeout = STANDARD_TIMEOUT
+            if self.state != State.LEADER:
+                timeout = (random.random() + 1) * STANDARD_TIMEOUT
             
-            if msg['type'] == 'put':
-                self.database[msg['key']] = msg['value']
-                mid = msg['MID']
-                response = {"src": self.id, "dst": msg['src'], "leader": "FFFF", "type": "fail", "MID": mid}
-                self.send(response)
-            elif msg['type'] == 'get':
-                value = self.database[msg['key']]
-                response = {"src": self.id, "dst": msg['src'], "leader": "FFFF", "type": "fail", "MID": mid}
-                self.send(response)
+            sock = select.select([self.socket], [], [], 0.001)[0]
+            for conn in sock:
+                data, addr = conn.recvfrom(65535)
+                msg = json.loads(data.decode('utf-8'))
+                print("Received message '%s'" % (msg,), flush=True)    
+                
+                if time.time() - last_heartbeat > timeout:
+                    if self.state == State.LEADER:
+                        self.send_heartbeat()
+                    else:
+                        self.election_protocol()
+
+                if msg['type'] == 'put':
+                    mid = msg['MID']
+                    response = {"src": self.id, "dst": msg['src'], "leader": self.curr_leader, "type": "fail", "MID": mid}
+                    self.send(response)
+                elif msg['type'] == 'get':
+                    response = {"src": self.id, "dst": msg['src'], "leader": self.curr_leader, "type": "fail", "MID": mid}
+                    self.send(response)
+
+
+
+                # if we recieve a heartbeat, continue on
+                if msg['type'] == 'append_entries':
+                    self.curr_leader = msg['leader']
+                    looking_for_votes = False
+                    votes = 0
+
+                # otherwise, go into candidate mode
+                else:
+                    self.state = State.CANDIDATE
+                    curr_term_number += 1
+
+                    # if we get a request_rpc, vote for them
+                    if msg['type'] == 'request_rpc':
+                        msg = {'src': self.id, 'dst': msg['src'], 
+                            'leader': 'FFFF', 
+                            "type": "vote"}
+                        self.send(msg)
+                        sent_vote_for_term = True
+
+                    # otherwise, send out a request rpc (should we not send out a vote if we already sent out a request rpc)
+                    else:
+                        msg = {'src': self.id, 'dst': 'FFFF', 
+                                'leader': 'FFFF', 
+                                "type": "request_rpc", 
+                                'log-length': len(self.database)}
+                        vote += 1
+                        self.send(msg)
+                        looking_for_votes = True
+                
+                    if looking_for_votes and msg['type'] == 'vote':
+                        votes += 1
+                        if votes >= (math.floor(len(self.others)/2) + 1):
+                            msg = {'src': self.id, 'dst': 'FFFF', 
+                                'leader': self.id, 
+                                "type": "append-entries", 
+                                'term': curr_term_number}
+                            self.send(msg)
+                            looking_for_votes = False
+                            votes = 0
+                            self.state = State.LEADER
+
+
 
 
 if __name__ == "__main__":
