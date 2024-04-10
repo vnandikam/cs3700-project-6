@@ -55,7 +55,7 @@ class Replica:
             if self.state != State.LEADER:
                 timeout = (random.random() + 1) * STANDARD_TIMEOUT
             
-            sock = select.select([self.socket], [], [], 0.001)[0]
+            sock = select.select([self.socket], [], [], 0.01)[0]
             for conn in sock:
                 data, addr = conn.recvfrom(65535)
                 msg = json.loads(data.decode('utf-8'))
@@ -66,20 +66,23 @@ class Replica:
                     last_heartbeat = time.time()
                     self.curr_leader = msg['leader']
                     looking_for_votes = False
+                    sent_vote_for_term = False
                     votes = 0
+                    self.state = State.FOLLOWER
 
-                elif msg['type'] == 'request_rpc': # vote for rpc
+                elif msg['type'] == 'request_rpc' and not sent_vote_for_term: # vote for rpc
+                    self.state = State.CANDIDATE
                     msg = {'src': self.id, 'dst': msg['src'], 
-                            'leader': 'FFFF', 
+                            'leader': 'FFFF',
                             "type": "vote"}
                     self.send(msg)
                     sent_vote_for_term = True
                 
-                elif msg['type'] == 'vote': # increment votes and see if i make quorum
+                elif msg['type'] == 'vote': # and looking_for_votes and not sent_vote_for_term: # increment votes and see if i make quorum
                     votes += 1
-                    if votes >= (math.floor(len(self.others)/2) + 1):
+                    if votes >= ((math.floor(len(self.others)/2)) + 1):
                         msg = {'src': self.id, 'dst': 'FFFF', 
-                            'leader': self.id, 
+                            'leader': self.id,
                             "type": "append-entries", 
                             'term': curr_term_number}
                         self.send(msg)
@@ -90,6 +93,7 @@ class Replica:
                 if time.time() - last_heartbeat > timeout:
                     if self.state == State.LEADER:
                         self.send_heartbeat()
+                        last_heartbeat = time.time()
                     else:
                         self.state = State.CANDIDATE
                         curr_term_number += 1
