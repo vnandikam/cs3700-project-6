@@ -21,6 +21,7 @@ class Replica:
         self.state = State.FOLLOWER
         self.curr_leader = 'FFFF'
         self.curr_term_number = 0
+        self.log_idx = 0
 
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(('localhost', 0))
@@ -40,7 +41,7 @@ class Replica:
                 "type": "append-entries", 
                 'term': self.curr_term_number}
         self.send(msg)
-
+        
     def run(self):
         curr_term_number = 0
         votes = 0
@@ -109,14 +110,36 @@ class Replica:
                         votes += 1
                         self.send(msg)
                         looking_for_votes = True
-
-                if msg['type'] == 'put':
+                if msg['type'] == 'put' or  msg['type'] == 'get':
                     mid = msg['MID']
-                    response = {"src": self.id, "dst": msg['src'], "leader": self.curr_leader, "type": "fail", "MID": mid}
-                    self.send(response)
-                elif msg['type'] == 'get':
-                    response = {"src": self.id, "dst": msg['src'], "leader": self.curr_leader, "type": "fail", "MID": mid}
-                    self.send(response)
+                    if self.state == State.LEADER:
+                        if msg['type'] == 'put': # adds the entry to our db if we are the leader and sends fail/ok 
+                            response = {"src": self.id, "dst": msg['src'], "leader": self.curr_leader, "type": "ok", "MID": mid}
+                            try:
+                                ## initial rpc message --> waiting for confirm to commit
+                                append_rpc_msg = {'src': self.id, 'dst': 'FFFF', 'leader': self.curr_leader, "type": "append-entries", 'term': self.curr_term_number, 
+                                                  'request_type': msg['type'], 'prev_log_idx': self.log_idx, "MID": mid, 'key': msg['key'], 'value': msg['value']}
+                                self.send(append_rpc_msg)
+                                ## how to do this only after we recieve a message back --> only for put?
+                                self.database[msg['key']] = msg['value']
+                            except:
+                                response = {"src": self.id, "dst": msg['src'], "leader": self.curr_leader, "type": "fail", "MID": mid}
+                            self.send(response)
+
+                        elif msg['type'] == 'get': # gets the entry from log. If entry exists, sends ok, otherwise sends fail
+                            response = {"src": self.id, "dst": msg['src'], "leader": self.curr_leader, "type": "fail", "MID": mid}
+                            value = self.database[msg['key']]
+                            if value:
+                                ## initial rpc message --> waiting for confirm to commit
+                                response = {"src": self.id, "dst": msg['src'], "leader": self.curr_leader, "type": "ok", "MID": mid, "value": value}
+                                append_rpc_msg = {'src': self.id, 'dst': 'FFFF', 'leader': self.curr_leader, "type": "append-entries", 'term': self.curr_term_number, 
+                                                  'request_type': msg['type'], 'prev_log_idx': self.log_idx, "MID": mid, 'key': msg['key']}
+                                self.send(append_rpc_msg)
+                            self.send(response)
+
+                    else: # redirects message if not the leader --> client tries again
+                        response = {"src": self.id, "dst": msg['src'], "leader": self.curr_leader, "type": "redirect", "MID": mid}
+                        self.send(response)
 
 
 
