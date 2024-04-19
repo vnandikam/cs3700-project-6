@@ -15,7 +15,6 @@ STANDARD_TIMEOUT = 0.15
 # ADD REPLICA LOGIC FOR GETTING AN APPENDRPC MESSAGE
     # IF IT IS SUCCESSFUL: THEN ADD TO LOG AND MAYBE DATABASE (POTENTAILLY OVERWRITE ANY ENTRIES IN LOG/DATABASE)
     # IF NOT: SEND APPEND FAIL
-# MAKE SURE LEADER SENDS OUT A COMMIT MESSAGE IF IT IS TIME
 # IF LEADER GETS APPEND-FAIL: MAKE SURE WE SEND THE WHOLE LOG AFTER THE TERM NUMBER
 
 class Replica:
@@ -45,10 +44,12 @@ class Replica:
         self.send(hello)
         print("Sent hello message: %s" % hello, flush=True)
 
+
     def send(self, message):
-       #  print('Replica ' + str(self.id) + ' sent ' + str(message))
+        # print('Replica ' + str(self.id) + ' sent ' + str(message))
         self.socket.sendto(json.dumps(message).encode('utf-8'), ('localhost', self.port))
 
+    # empty append entry message for a list of followers
     def send_heartbeat(self, followers):
         for follower in followers:
             msg = {'src': self.id, 'dst': follower, 
@@ -57,6 +58,8 @@ class Replica:
                     'term': self.curr_term_number}
             self.send(msg)
 
+    # send either append entry message to followers or a heartbeat
+    # TODO: send out one AppendEntry message to each follower with everything they need
     def leader_timeout_protocol(self):
         followers = self.others.copy()
         for reminder in self.leader_buff:
@@ -69,7 +72,8 @@ class Replica:
         self.send_heartbeat(followers)
         self.last_heartbeat = time.time()
 
-    def leader_timeout(self, timeout):
+    # 
+    def timeout(self, timeout):
         if time.time() - self.last_heartbeat > timeout:
             if self.state == State.LEADER:
                 self.leader_timeout_protocol()
@@ -84,6 +88,7 @@ class Replica:
                         "type": "request_rpc", 
                         'log-length': len(self.database)}
                 self.votes += 1
+                print('Replica ' + str(self.id) + ' sent ' + str(msg))
                 self.send(msg)
                 self.looking_for_votes = True
 
@@ -100,36 +105,54 @@ class Replica:
                 #             'curr_log_idx': self.curr_log_idx
                 #             }
 
+    # follower receives an AppendEntry
     def process_append_rpc(self, msg):
         curr_msg_log_index = msg['prev_log_entry_idx']
         curr_msg_term_index = msg['prev_log_entry_term']
         log_number = msg['curr_log_idx']
 
-        if self.log[curr_msg_log_index] and self.log[curr_msg_log_index]['term'] == curr_msg_term_index:
-            # exists
-            log_entry = {
-                'msg': msg['entries'],
-                'term': msg['term']
-            }
+        if curr_msg_log_index in self.log.keys() and self.log[curr_msg_log_index]['term'] == curr_msg_term_index:
+            
+            for log_entry in self.log.copy().keys():
+                if log_entry > curr_msg_log_index:
+                    self.database.pop(self.log[log_entry]['msg']['key'])
+                    self.log.pop(log_entry)
 
-            if not self.log[log_number]:
-                self.log[log_number] = log_entry
-                leader_msg = {
-                    'type': 'append-true',
+            for append_entry in msg['entries'].reverse():
+                if not self.log[append_entry['curr_log_idx']]:
+                    log_entry = {
+                    'msg': append_entry['entries'],
+                    'term': append_entry['term']
+                    }
+                    self.log[append_entry['curr_log_idx']] = log_entry
+                    leader_msg = {
+                        'type': 'append-true',
+                        'src': self.id,
+                        'dst': msg['src'],
+                        'log_number': append_entry['curr_log_idx'],
+                        'term_number': append_entry['term'],
+                        'leader': self.curr_leader
+                    }
+                    print('Replica ' + str(self.id) + ' sent ' + str(leader_msg))
+                    self.send(leader_msg)
+                
+                if msg['is_committed'] == True:
+                    self.database[append_entry['msg']['key']] = append_entry['msg']['value']
+        
+        else:
+            leader_msg = {
+                    'type': 'append-fail',
                     'src': self.id,
                     'dst': msg['src'],
-                    'log_number': log_number,
-                    'term_number': msg['term']
-                }
-                self.send(leader_msg)
-            
-            if msg['is_committed'] == True:
-                self.database[]
+                    'log_number': curr_msg_log_index,
+                    'term_number': curr_msg_term_index,
+                    'leader': self.curr_leader
+            }
+            print('Replica ' + str(self.id) + ' sent ' + str(leader_msg))
+            self.send(leader_msg)
 
 
-
-
-
+    # recieved a heartbeat from leader and reset timers
     def recieve_heartbeat(self, msg):
         self.last_heartbeat = time.time()
         self.curr_leader = msg['leader']
@@ -138,28 +161,32 @@ class Replica:
         self.votes = 0
         self.state = State.FOLLOWER
         self.leader_buff = {}
-        print("Received message '%s'" % (msg,), flush=True)
-        if msg['entries']:
+        # print("Received message '%s'" % (msg,), flush=True)
+        if 'entries' in msg.keys():
+            print('IS THIS BEING CALLED RN')
             self.process_append_rpc(msg)
 
-    def request_rpc(self, msg):
+    # 
+    def send_vote(self, msg):
         self.state = State.CANDIDATE
         self.curr_leader = 'FFFF'
         msg = {'src': self.id, 'dst': msg['src'], 
                 'leader': 'FFFF',
                 "type": "vote"}
+        print('Replica ' + str(self.id) + ' sent ' + str(msg))
         self.send(msg)
         self.last_heartbeat = time.time()
         self.sent_vote_for_term = True
-        print("Received message '%s'" % (msg,), flush=True)
+       # print("Received message '%s'" % (msg,), flush=True)
     
-    def vote_for_leader(self, msg):
+    def receive_vote(self, msg):
         self.votes += 1
         if self.votes >= self.majority:
             msg = {'src': self.id, 'dst': 'FFFF', 
                     'leader': self.id,
                     "type": "append-entries", 
                     'term': self.curr_term_number}
+            print('Replica ' + str(self.id) + ' sent ' + str(msg))
             self.send(msg)
             self.looking_for_votes = False
             self.votes = 0
@@ -167,13 +194,14 @@ class Replica:
             self.state = State.LEADER
             self.leader_buff = {}
             self.follower_buff = []
-        print("Received message '%s'" % (msg,), flush=True)
+       #  print("Received message '%s'" % (msg,), flush=True)
 
-
+    # called when there is a get or put
     def database_transaction(self, msg):
         mid = msg['MID']
         if self.state == State.LEADER:
             if msg['type'] == 'put':
+                # add put to the log
                 self.curr_log_idx += 1
                 curr_log = {
                     'msg': msg,
@@ -181,8 +209,13 @@ class Replica:
                 }
                 self.log[self.curr_log_idx] = curr_log
 
-                prev_term = self.log[self.curr_log_idx - 1]['term'] if  self.log[self.curr_log_idx - 1] else -1
+                # send out an append entry message to all followers
+                prev_term =  -1
                 
+
+                if self.curr_log_idx - 1 in self.log.keys():
+                    prev_term = self.log[self.curr_log_idx - 1]['term']
+
                 append_msg = {'src': self.id, 'dst': 'FFFF', 
                             'leader': self.id, 
                             "type": "append-entries", 
@@ -193,7 +226,16 @@ class Replica:
                             'curr_log_idx': self.curr_log_idx,
                             'commit': False
                             }
+                
+                append_msg['entries'] = [{'term': self.curr_term_number,
+                                            'entries': msg,
+                                            'curr_log_idx': self.curr_log_idx,
+                                            'commit': False
+                                            }]
+
+                print('Replica ' + str(self.id) + ' sent ' + str(append_msg))
                 self.send(append_msg)
+                print('THIS IS THE OTHER SET: ' + str(set(self.others.copy())))
                 buffer = {
                     'msg': msg,
                     'others': set(self.others.copy()),
@@ -201,36 +243,45 @@ class Replica:
                     'append_msg': append_msg
                     
                 }
+                # add to buffer
                 self.leader_buff[self.curr_log_idx] = buffer
 
+            # if it's a get, look inside database
             elif msg['type'] == 'get':
                 value = self.database.get(msg['key'], '')
                 response = {"src": self.id, "dst": msg['src'], "leader": self.curr_leader, "type": "ok", "MID": mid, 'value': value}
+                print('Replica ' + str(self.id) + ' sent ' + str(response))
                 self.send(response)
+        
+        # send fail because there is no leader
         elif self.state == State.CANDIDATE:
             response = {"src": self.id, "dst": msg['src'], "leader": self.curr_leader, "type": "fail", "MID": mid}
+            print('Replica ' + str(self.id) + ' sent ' + str(response))
             self.send(response)
+        # redirect to leader
         elif self.state == State.FOLLOWER:
             response = {"src": self.id, "dst": msg['src'], "leader": self.curr_leader, "type": "redirect", "MID": mid}
+            print('Replica ' + str(self.id) + ' sent ' + str(response))
             self.send(response)
 
 
     def run(self):
         self.last_heartbeat = time.time()
         while True:
-            # use time in python instead of setting select for the timeout
-            # track the last time we sent a heartbeat/recieved a heartbeat
+
+            # set timeout
             timeout = STANDARD_TIMEOUT / 2
             if self.state != State.LEADER:
                 timeout = (random.random() + 1) * STANDARD_TIMEOUT
 
-            self.leader_timeout(timeout)
+            self.timeout(timeout)
 
             sock = select.select([self.socket], [], [], 0.05)[0]
             for conn in sock:
                 data, addr = conn.recvfrom(65535)
                 msg = json.loads(data.decode('utf-8'))  
-
+                
+                # receving a reply to an append entry message
                 if self.state == State.LEADER:
                     if msg['type'] == 'append-true':
                         buffer = self.leader_buff[msg['log_number']]
@@ -242,19 +293,35 @@ class Replica:
                                 response = {"src": self.id, "dst": buffer['msg']['src'], "leader": self.curr_leader, "type": "ok", "MID": buffer['msg']['MID']}
                                 self.send(response)
                                 buffer['is_committed'] = True
-                                commit_msg = {
+                                buffer['append_msg']['commit'] = True
+                                buffer['append_msg']['entries'][0]['commit'] = True
+                                self.send(buffer['append_msg'])
 
-                                }
                         if len(curr_buff_followers) == 0:
                             self.leader_buff.pop(msg['log_number'])
 
                     elif msg['type'] == 'append-fail':
+                        # goal: if we get a fail message from a replica, they send back the log number and term number of an item they don't have
+                        # so we need to give them the previous item as well as any others
+
                         log_number = msg['log_number']
                         term_number = msg['term_number']
                         # curr_append_message = self.log[self.curr_log_idx]
                         prev_append_message = self.log[log_number]
                         prev_term = self.log[log_number - 1]['term'] if  self.log[self.curr_log_idx - 1] else -1
-            
+
+
+                        entries = []
+                        for log_num in self.log.keys():
+                            if log_num >= log_number:
+                                is_commited = False
+                                if self.database[self.log[log_num]['msg']['key']]:
+                                    is_commited = True
+                                entries.append({'term': self.log[log_num]['term'],
+                                                'entries': self.log[log_num]['msg'],
+                                                'curr_log_idx': log_num,
+                                                'commit': is_commited
+                                                })
 
                         append_msg = {'src': self.id, 'dst': msg['src'], 
                             'leader': self.id, 
@@ -262,12 +329,12 @@ class Replica:
                             'term': term_number,
                             'prev_log_entry_idx': log_number - 1,
                             'prev_log_entry_term': prev_term,
-                            'entries': prev_append_message['msg'],
-                            'curr_log_idx': log_number
+                            'entries': entries,
+                            'curr_log_idx': log_number,
+                            'commit': self.leader_buff[msg['log_number']]['is_committed']
                             }
-                self.send(append_msg)
 
-
+                        self.send(append_msg)
 
                 
                 ### MESSAGE OPTIONS ###
@@ -275,10 +342,10 @@ class Replica:
                     self.recieve_heartbeat(msg)
 
                 elif msg['type'] == 'request_rpc' and not self.sent_vote_for_term: # vote for rpc
-                    self.request_rpc(msg)
+                    self.send_vote(msg)
                 
-                elif msg['type'] == 'vote': # and looking_for_votes and not sent_vote_for_term: # increment votes and see if i make quorum
-                    self.vote_for_leader(msg)
+                elif msg['type'] == 'vote':
+                    self.receive_vote(msg)
 
                 elif msg['type'] == 'put' or msg['type'] == 'get':
                     self.database_transaction(msg)
