@@ -221,7 +221,6 @@ class Replica:
                 # self.database[msg['key']] = msg['value']
                 # response = {"src": self.id, "dst": msg['src'], "leader": self.curr_leader, "type": "ok", "MID": mid}
                 # self.send(response)
-
                 self.curr_log_idx += 1
                 curr_log = {
                     'term':  self.curr_term_number,
@@ -251,7 +250,7 @@ class Replica:
         
         # send fail because there is no leader
         elif self.state == State.CANDIDATE:
-            response = {"src": self.id, "dst": msg['src'], "leader": self.curr_leader, "type": "fail", "MID": mid}
+            response = {"src": self.id, "dst": msg['src'], "leader": self.curr_leader, "type": "redirect", "MID": mid}
             # print('Replica ' + str(self.id) + ' sent ' + str(response))
             self.send(response)
         # redirect to leader
@@ -291,7 +290,7 @@ class Replica:
 
             self.timeout(timeout)
 
-            sock = select.select([self.socket], [], [], 0.001)[0]
+            sock = select.select([self.socket], [], [], 0.003)[0]
             for conn in sock:
                 data, addr = conn.recvfrom(65535)
                 msg = json.loads(data.decode('utf-8'))  
