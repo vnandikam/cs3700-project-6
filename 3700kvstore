@@ -29,6 +29,7 @@ class Replica:
         self.terms_voted_for = set()
         self.majority = math.floor(len(self.others)/2)
         self.timeout = (random.random() + 1) * STANDARD_TIMEOUT
+        self.curr_commit_index = 0;
 
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(('localhost', 0))
@@ -52,7 +53,8 @@ class Replica:
                     "type": "append-entries", 
                     'term': self.curr_term_number,
                     'leader_commit': self.curr_log_idx,
-                    'entries': []}
+                    'entries': [],
+                    'leader_commit_index': self.curr_commit_index}
             self.send(msg, False)
 
     # send either AppendEntry message to followers or a heartbeat
@@ -109,7 +111,8 @@ class Replica:
                       'term': term_number,
                       'prev_log_index': log_index - 1,
                       'prev_log_term': prev_term_number,
-                      'entries': []
+                      'entries': [],
+                      'leader_commit_index': self.curr_commit_index
                       }
         
         # loads up the append entry with appropriate information
@@ -151,8 +154,10 @@ class Replica:
                     'value': entry['value']
                 }
                 self.log[self.curr_log_idx] = curr_log
-                if entry['commit']:
-                    self.database[entry['key']] = entry['value']
+                # if entry['commit']:
+                #     self.database[entry['key']] = entry['value']
+                #     if entry['leader_commit'] > self.curr_commit_index:
+                #         self.curr_commit_index = entry['leader_commit']
 
 
             success_msg = {
@@ -161,18 +166,20 @@ class Replica:
                 'leader': self.curr_leader,
                 'log_id': msg['leader_commit'],
                 'term': msg['term'],
+                'leader-commit-index': self.curr_commit_index,
                 'type': 'append-success'
             }
             self.send(success_msg)
         else:
             print('APPEND FAIL')
             # print(self.log)
+            most_recent_append_entry = list(self.log.keys())[-1]
             fail_msg = {
                 'src': self.id,
                 'dst': msg['src'],
                 'leader': self.curr_leader,
-                'log_id': msg['prev_log_index'],
-                'term': msg['prev_log_term'],
+                'log_id': most_recent_append_entry,
+                'term': self.log[most_recent_append_entry]['term'],
                 'type': 'append-fail'
             }
             self.send(fail_msg)
@@ -186,6 +193,14 @@ class Replica:
             self.state = State.FOLLOWER
             self.leader_buff = {}
             self.curr_term_number = max(msg['term'], self.curr_term_number)
+
+            # upkeep commits at every heartbeat
+
+            for entry in self.log.keys():
+                if entry <= msg['leader_commit_index'] and self.log[entry]['key'] not in self.database.keys():
+                    self.database[self.log[entry]['key']] = self.log[entry]['value']
+                    if self.log[entry]['leader_commit'] > self.curr_commit_index:
+                        self.curr_commit_index = self.log[entry]['leader_commit']
 
             # potentially has other information
             if len(msg['entries']) > 0:
@@ -224,7 +239,8 @@ class Replica:
                     'leader': self.id,
                     "type": "append-entries", 
                     'term': self.curr_term_number,
-                    'entries': []}
+                    'entries': [],
+                    'leader_commit_index': self.curr_commit_index}
             # print('Replica ' + str(self.id) + ' sent ' + str(msg))
             self.send(msg)
             self.votes = 0
@@ -251,7 +267,8 @@ class Replica:
                     'dst': msg['src'],
                     'leader_commit': self.curr_log_idx,
                     'key': msg['key'],
-                    'value': msg['value']
+                    'value': msg['value'],
+                    'commit_index': self.curr_commit_index
                 }
                 self.log[self.curr_log_idx] = curr_log
 
@@ -267,9 +284,14 @@ class Replica:
             # if it's a get, look inside database
             elif msg['type'] == 'get':
                 value = self.database.get(msg['key'], '')
-                response = {"src": self.id, "dst": msg['src'], "leader": self.curr_leader, "type": "ok", "MID": mid, 'value': value}
-                # print('Replica ' + str(self.id) + ' sent ' + str(response))
-                self.send(response)
+                if not value == '':
+                    response = {"src": self.id, "dst": msg['src'], "leader": self.curr_leader, "type": "ok", "MID": mid, 'value': value}
+                    # print('Replica ' + str(self.id) + ' sent ' + str(response))
+                    self.send(response)
+                else :
+                    response = {"src": self.id, "dst": msg['src'], "leader": self.curr_leader, "type": "fail", "MID": mid}
+                    # print('Replica ' + str(self.id) + ' sent ' + str(response))
+                    self.send(response)
         
         # send fail because there is no leader
         elif self.state == State.CANDIDATE:
@@ -294,10 +316,11 @@ class Replica:
             print('HIT MAJORITY ' + str(len_buffer_followers))
             if self.log[msg['log_id']]['key'] not in self.database.keys(): # not committed yet
                 self.database[self.log[msg['log_id']]['key']] = self.log[msg['log_id']]['value']
+                self.curr_commit_index += 1
                 response = {"src": self.id, "dst": self.log[msg['log_id']]['dst'], "leader": self.curr_leader, "type": "ok", "MID": self.log[msg['log_id']]['mid']}
                 self.send(response)
-                commit_msg = {"src": self.id, "dst": BROADCAST, "leader": self.curr_leader, "type": "commit", 'leader_commit': msg['log_id'], 'term': self.log[msg['log_id']]['term']}
-                self.send(commit_msg)
+                # commit_msg = {"src": self.id, "dst": BROADCAST, "leader": self.curr_leader, "type": "commit", 'leader_commit': msg['log_id'], 'term': self.log[msg['log_id']]['term']}
+                # self.send(commit_msg)
         if len_buffer_followers == 0:
             self.leader_buff.pop(msg['log_id'])
 
@@ -327,9 +350,9 @@ class Replica:
                 if msg['type'] == 'append-entries': # receive heartbeat
                     self.recieve_heartbeat(msg)
 
-                elif msg['type'] == 'commit':
-                    if msg['leader_commit'] in self.log.keys():
-                        self.database[self.log[msg['leader_commit']]['key']] = self.log[msg['leader_commit']]['value']
+                # elif msg['type'] == 'commit':
+                #     if msg['leader_commit'] in self.log.keys():
+                #         self.database[self.log[msg['leader_commit']]['key']] = self.log[msg['leader_commit']]['value']
                 
                 elif msg['type'] == 'request_rpc':
                     if msg['term'] not in self.terms_voted_for:
