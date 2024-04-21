@@ -34,7 +34,7 @@ class Replica:
         self.curr_log_idx = 0
         self.leader_buff = {}
         self.follower_buff = []
-        self.majority = (math.floor(len(self.others)/2)) + 1
+        self.majority = math.floor(len(self.others)/2)
 
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(('localhost', 0))
@@ -68,24 +68,30 @@ class Replica:
         self.send_heartbeat(self.others)
         self.last_heartbeat = time.time()
 
+    def send_request_rpc(self):
+        self.last_heartbeat = time.time()
+        self.state = State.CANDIDATE
+        self.leader_buff = {}
+        self.follower_buff = []
+        self.curr_leader = 'FFFF'
+        self.curr_term_number += 1
+        msg = {'src': self.id, 'dst': 'FFFF', 
+                'leader': 'FFFF', 
+                "type": "request_rpc",
+                'term': self.curr_term_number,
+                'log-length': self.curr_log_idx}
+        self.votes += 1
+        self.send(msg)
+        self.looking_for_votes = True
+
     # 
     def timeout(self, timeout):
         if time.time() - self.last_heartbeat > timeout:
             if self.state == State.LEADER:
                 self.leader_timeout_protocol()
             else:
-                self.state = State.CANDIDATE
-                self.leader_buff = {}
-                self.follower_buff = []
-                self.curr_leader = 'FFFF'
-                self.curr_term_number += 1
-                msg = {'src': self.id, 'dst': 'FFFF', 
-                        'leader': 'FFFF', 
-                        "type": "request_rpc", 
-                        'log-length': len(self.database)}
-                self.votes += 1
-                self.send(msg)
-                self.looking_for_votes = True
+                self.send_request_rpc()
+
 
     def send_append_entry(self, dst, log_index):
         term_number = self.log[log_index]['term']
@@ -127,7 +133,6 @@ class Replica:
                     if self.log[log_id]['key'] in self.database.keys():
                         self.database.pop(self.log[log_id]['key'])
                     self.log.pop(log_id)
-                    
 
             for entry in msg['entries']:
                 self.curr_log_idx = max(self.curr_log_idx, entry['leader_commit'])
@@ -169,31 +174,37 @@ class Replica:
 
     # recieved a heartbeat from leader and reset timers
     def recieve_heartbeat(self, msg):
-        self.last_heartbeat = time.time()
-        self.curr_leader = msg['leader']
-        self.looking_for_votes = False
-        self.sent_vote_for_term = False
-        self.votes = 0
-        self.state = State.FOLLOWER
-        self.leader_buff = {}
+        if msg['term'] >= self.curr_term_number:
+            self.last_heartbeat = time.time()
+            self.curr_leader = msg['leader']
+            self.looking_for_votes = False
+            self.sent_vote_for_term = False
+            self.votes = 0
+            self.state = State.FOLLOWER
+            self.leader_buff = {}
+            self.curr_term_number = max(msg['term'], self.curr_term_number)
+
+            if len(msg['entries']) > 0:
+                self.receive_append_entry(msg)
+        else:
+            self.send_request_rpc()
+        
        # print("Received message '%s'" % (msg,), flush=True)
-
-        if len(msg['entries']) > 0:
-            self.receive_append_entry(msg)
-
-    # 
     def send_vote(self, msg):
-        print('CANDIDATE: ' + str(self.id) + ' voted for ' + str(msg['src']))
-        self.state = State.CANDIDATE
-        self.curr_leader = 'FFFF'
-        msg = {'src': self.id, 'dst': msg['src'], 
-                'leader': 'FFFF',
-                "type": "vote"}
-        # print('Replica ' + str(self.id) + ' sent ' + str(msg))
-        self.send(msg)
-        self.last_heartbeat = time.time()
-        self.sent_vote_for_term = True
-        print("Received message '%s'" % (msg,), flush=True)
+        if msg['term'] >= self.curr_term_number and msg['log-length'] >= self.curr_log_idx:
+            print('CANDIDATE: ' + str(self.id) + ' voted for ' + str(msg['src']))
+            self.state = State.CANDIDATE
+            self.curr_leader = 'FFFF'
+            msg = {'src': self.id, 'dst': msg['src'], 
+                    'leader': 'FFFF',
+                    "type": "vote"}
+            # print('Replica ' + str(self.id) + ' sent ' + str(msg))
+            self.send(msg)
+            self.last_heartbeat = time.time()
+            self.sent_vote_for_term = True
+            print("Received message '%s'" % (msg,), flush=True)
+        else:
+            self.send_request_rpc()
     
     def receive_vote(self, msg):
         self.votes += 1
@@ -250,7 +261,7 @@ class Replica:
         
         # send fail because there is no leader
         elif self.state == State.CANDIDATE:
-            response = {"src": self.id, "dst": msg['src'], "leader": self.curr_leader, "type": "redirect", "MID": mid}
+            response = {"src": self.id, "dst": msg['src'], "leader": self.curr_leader, "type": "fail", "MID": mid}
             # print('Replica ' + str(self.id) + ' sent ' + str(response))
             self.send(response)
         # redirect to leader
@@ -313,14 +324,14 @@ class Replica:
                         self.database[self.log[msg['leader_commit']]['key']] = self.log[msg['leader_commit']]['value']
                 
                 elif msg['type'] == 'request_rpc' and not self.sent_vote_for_term: # vote for rpc
-                    self.send_vote(msg)
+                    if not self.looking_for_votes:
+                        self.send_vote(msg)
                 
                 elif msg['type'] == 'vote':
                     self.receive_vote(msg)
 
                 elif msg['type'] == 'put' or msg['type'] == 'get':
                     self.database_transaction(msg)
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='run a key-value store')
