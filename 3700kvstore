@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-import argparse, socket, time, json, select, struct, sys, math, os, random
+import argparse, socket, time, json, select, math, random
 from enum import Enum
 
 class State(Enum):
@@ -10,12 +10,6 @@ class State(Enum):
 
 BROADCAST = "FFFF"
 STANDARD_TIMEOUT = 0.15
-
-
-# ADD REPLICA LOGIC FOR GETTING AN APPENDRPC MESSAGE
-    # IF IT IS SUCCESSFUL: THEN ADD TO LOG AND MAYBE DATABASE (POTENTAILLY OVERWRITE ANY ENTRIES IN LOG/DATABASE)
-    # IF NOT: SEND APPEND FAIL
-# IF LEADER GETS APPEND-FAIL: MAKE SURE WE SEND THE WHOLE LOG AFTER THE TERM NUMBER
 
 class Replica:
     def __init__(self, port, id, others):
@@ -28,12 +22,11 @@ class Replica:
         self.curr_term_number = 0
         self.log = {}
         self.votes = 0
-        self.looking_for_votes = False
         self.last_heartbeat = time.time()
-        self.sent_vote_for_term = False
         self.curr_log_idx = 0
         self.leader_buff = {}
-        self.follower_buff = []
+        self.reset_timer = True
+        self.terms_voted_for = set()
         self.majority = math.floor(len(self.others)/2)
         self.timeout = (random.random() + 1) * STANDARD_TIMEOUT
 
@@ -62,7 +55,7 @@ class Replica:
                     'entries': []}
             self.send(msg, False)
 
-    # send either append entry message to followers or a heartbeat
+    # send either AppendEntry message to followers or a heartbeat
     # TODO: send out one AppendEntry message to each follower with everything they need
     def leader_timeout_protocol(self):
         followers = self.others.copy()
@@ -70,43 +63,39 @@ class Replica:
         self.send_heartbeat(self.others)
         self.last_heartbeat = time.time()
 
+    # reset timer depending on type of replica
     def reset_timeout(self):
-
-        # timeout = STANDARD_TIMEOUT / 2
-        # if self.state != State.LEADER:
-        #     self.timeout = (random.random() + 1) * STANDARD_TIMEOUT
         if self.state == State.LEADER:
             self.timeout = STANDARD_TIMEOUT / 2
         else:
             self.timeout = (random.random() + 1) * STANDARD_TIMEOUT
 
+    # send a request for votes
     def send_request_rpc(self):
-        # self.last_heartbeat = time.time()
+        self.reset_timer = False
         self.state = State.CANDIDATE
         self.leader_buff = {}
-        self.follower_buff = []
         self.curr_leader = 'FFFF'
         self.curr_term_number += 1
+        self.terms_voted_for.add(self.curr_term_number)
         msg = {'src': self.id, 'dst': 'FFFF', 
                 'leader': 'FFFF', 
                 "type": "request_rpc",
                 'term': self.curr_term_number,
                 'log-length': self.curr_log_idx}
-        self.votes += 1
         self.send(msg)
-        self.looking_for_votes = True
 
-    # 
+    # checks if timer has run out and then calls appropriate protocol
     def run_timeout(self, timeout):
         if time.time() - self.last_heartbeat > timeout:
             if self.state == State.LEADER:
                 self.leader_timeout_protocol()
             else:
-                print('SENT REQUEST RPC BECAUSE TIMEOUT HAS EXPIRED')
-                self.reset_timeout()
-                self.send_request_rpc()
-
-
+                if self.reset_timer:
+                    print('SENT REQUEST RPC BECAUSE TIMEOUT HAS EXPIRED')
+                    self.send_request_rpc()
+                    
+    # sends append entry with appropriate information to a follower
     def send_append_entry(self, dst, log_index):
         term_number = self.log[log_index]['term']
         prev_term_number = -1
@@ -123,6 +112,7 @@ class Replica:
                       'entries': []
                       }
         
+        # loads up the append entry with appropriate information
         for leader_commit in self.log.keys():
             if leader_commit >= log_index:
                 is_committed = True if self.log[leader_commit]['key'] in self.database.keys() else False
@@ -139,6 +129,7 @@ class Replica:
         
         self.send(append_msg)
 
+    # protocol for processing an append entry received
     def receive_append_entry(self, msg):
         self.reset_timeout()
         if msg['prev_log_index'] == 0 or (msg['prev_log_index'] in self.log.keys() and self.log[msg['prev_log_index']]['term'] == msg['prev_log_term']):
@@ -186,49 +177,49 @@ class Replica:
             }
             self.send(fail_msg)
 
-
     # recieved a heartbeat from leader and reset timers
     def recieve_heartbeat(self, msg):
         if msg['term'] >= self.curr_term_number:
             self.last_heartbeat = time.time()
             self.curr_leader = msg['leader']
-            self.looking_for_votes = False
-            self.sent_vote_for_term = False
             self.votes = 0
             self.state = State.FOLLOWER
             self.leader_buff = {}
             self.curr_term_number = max(msg['term'], self.curr_term_number)
 
+            # potentially has other information
             if len(msg['entries']) > 0:
                 self.receive_append_entry(msg)
         else:
             print('SENT REQUEST RPC BECAUSE REJECT APPEND ENTRY')
             self.send_request_rpc()
         
-       # print("Received message '%s'" % (msg,), flush=True)
+    # sends vote to another replica
     def send_vote(self, msg):
-        if msg['term'] >= self.curr_term_number and msg['log-length'] >= self.curr_log_idx:
-            print('CANDIDATE: ' + str(self.id) + ' voted for ' + str(msg['src']))
-            self.state = State.CANDIDATE
-            self.curr_leader = 'FFFF'
-            msg = {'src': self.id, 'dst': msg['src'], 
-                    'leader': 'FFFF',
-                    "type": "vote"}
-            # print('Replica ' + str(self.id) + ' sent ' + str(msg))
-            self.reset_timeout()
-            self.send(msg)
-            self.last_heartbeat = time.time()
-            self.sent_vote_for_term = True
-            print("Received message '%s'" % (msg,), flush=True)
+        self.terms_voted_for.add(msg['term'])
+        print('CANDIDATE: ' + str(self.id) + ' voted for ' + str(msg['src']))
+        self.state = State.CANDIDATE
+        self.reset_timer = True
+        self.curr_leader = 'FFFF'
+        msg = {'src': self.id, 'dst': msg['src'], 
+                'leader': 'FFFF',
+                "type": "vote",
+                'term': self.curr_term_number}
+        # print('Replica ' + str(self.id) + ' sent ' + str(msg))
+        self.reset_timeout()
+        self.timeout = 0.5
+        self.send(msg)
+        self.last_heartbeat = time.time()
+        print("Received message '%s'" % (msg,), flush=True)
             
-        else:
-            print('SENT REQUEST RPC BECAUSE REJECT VOTE')
-            self.send_request_rpc()
+
     
+    # receives a vote and sees if we hit majority
     def receive_vote(self, msg):
         self.votes += 1
         print('REPLICA ' + str(self.id) + 'HAS THIS MANY VOTES' + str(self.votes))
         if self.votes >= self.majority:
+            print('REPLICA ' + str(self.id) + 'HAS THIS MAJORITY VOTES')
             msg = {'src': self.id, 'dst': 'FFFF', 
                     'leader': self.id,
                     "type": "append-entries", 
@@ -236,15 +227,13 @@ class Replica:
                     'entries': []}
             # print('Replica ' + str(self.id) + ' sent ' + str(msg))
             self.send(msg)
-            self.looking_for_votes = False
             self.votes = 0
             self.curr_leader = self.id
             self.state = State.LEADER
-            # self.reset_timeout()
+            self.reset_timer = True
+            self.reset_timeout()
             self.leader_buff = {}
-            self.follower_buff = []
             print("Received message '%s'" % (msg,), flush=True)
-            print('REPLICA ' + str(self.id) + 'HAS HIT MAJORITY')
           
 
     # called when there is a get or put
@@ -293,7 +282,7 @@ class Replica:
             # print('Replica ' + str(self.id) + ' sent ' + str(response))
             self.send(response)
 
-
+    # they correctly appended a message!!
     def successful_append_yay(self, msg):
         buffer = self.leader_buff[msg['log_id']]
         buff_followers = buffer['others']
@@ -342,16 +331,18 @@ class Replica:
                     if msg['leader_commit'] in self.log.keys():
                         self.database[self.log[msg['leader_commit']]['key']] = self.log[msg['leader_commit']]['value']
                 
-                elif msg['type'] == 'request_rpc' and not self.sent_vote_for_term: # vote for rpc
-                    # sent_vote_for_term = sent out a request for votes
-                    if not self.looking_for_votes:
-                        # true if you have not 
-                        self.reset_timeout()
-                        self.send_vote(msg)
+                elif msg['type'] == 'request_rpc':
+                    if msg['term'] not in self.terms_voted_for:
+                        self.curr_term_number = max(msg['term'], self.curr_term_number)
+                        if msg['term'] >= self.curr_term_number: # and msg['log-length'] >= self.curr_log_idx:
+                            self.send_vote(msg)
+                        else:
+                            print('REJECTED REQUEST RPC AND SEND OUR OWN')
+                            self.send_request_rpc()
                     
-                
                 elif msg['type'] == 'vote':
-                    self.receive_vote(msg)
+                    if self.state == State.CANDIDATE:
+                        self.receive_vote(msg)
 
                 elif msg['type'] == 'put' or msg['type'] == 'get':
                     self.database_transaction(msg)
