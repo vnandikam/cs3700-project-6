@@ -58,6 +58,7 @@ class Replica:
                     'leader': self.id, 
                     "type": "append-entries", 
                     'term': self.curr_term_number,
+                    'leader_commit': self.curr_log_idx,
                     'entries': []}
             self.send(msg, False)
 
@@ -214,10 +215,12 @@ class Replica:
                     'leader': 'FFFF',
                     "type": "vote"}
             # print('Replica ' + str(self.id) + ' sent ' + str(msg))
+            self.reset_timeout()
             self.send(msg)
             self.last_heartbeat = time.time()
             self.sent_vote_for_term = True
             print("Received message '%s'" % (msg,), flush=True)
+            
         else:
             print('SENT REQUEST RPC BECAUSE REJECT VOTE')
             self.send_request_rpc()
@@ -237,7 +240,7 @@ class Replica:
             self.votes = 0
             self.curr_leader = self.id
             self.state = State.LEADER
-            self.reset_timeout()
+            # self.reset_timeout()
             self.leader_buff = {}
             self.follower_buff = []
             print("Received message '%s'" % (msg,), flush=True)
@@ -312,10 +315,6 @@ class Replica:
 
     def run(self):
         self.last_heartbeat = time.time()
-        # timeout = STANDARD_TIMEOUT / 2
-        # if self.state != State.LEADER:
-        #     self.timeout = (random.random() + 1) * STANDARD_TIMEOUT
-
         while True:
 
             # set timeout
