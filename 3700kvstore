@@ -316,7 +316,8 @@ class Replica:
             print('HIT MAJORITY ' + str(len_buffer_followers))
             if self.log[msg['log_id']]['key'] not in self.database.keys(): # not committed yet
                 self.database[self.log[msg['log_id']]['key']] = self.log[msg['log_id']]['value']
-                self.curr_commit_index += 1
+                if not msg['log_id'] < self.curr_commit_index:
+                    self.curr_commit_index += 1
                 response = {"src": self.id, "dst": self.log[msg['log_id']]['dst'], "leader": self.curr_leader, "type": "ok", "MID": self.log[msg['log_id']]['mid']}
                 self.send(response)
                 # commit_msg = {"src": self.id, "dst": BROADCAST, "leader": self.curr_leader, "type": "commit", 'leader_commit': msg['log_id'], 'term': self.log[msg['log_id']]['term']}
