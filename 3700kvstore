@@ -35,6 +35,7 @@ class Replica:
         self.leader_buff = {}
         self.follower_buff = []
         self.majority = math.floor(len(self.others)/2)
+        self.timeout = (random.random() + 1) * STANDARD_TIMEOUT
 
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(('localhost', 0))
@@ -68,8 +69,18 @@ class Replica:
         self.send_heartbeat(self.others)
         self.last_heartbeat = time.time()
 
+    def reset_timeout(self):
+
+        # timeout = STANDARD_TIMEOUT / 2
+        # if self.state != State.LEADER:
+        #     self.timeout = (random.random() + 1) * STANDARD_TIMEOUT
+        if self.state == State.LEADER:
+            self.timeout = STANDARD_TIMEOUT / 2
+        else:
+            self.timeout = (random.random() + 1) * STANDARD_TIMEOUT
+
     def send_request_rpc(self):
-        self.last_heartbeat = time.time()
+        # self.last_heartbeat = time.time()
         self.state = State.CANDIDATE
         self.leader_buff = {}
         self.follower_buff = []
@@ -85,11 +96,13 @@ class Replica:
         self.looking_for_votes = True
 
     # 
-    def timeout(self, timeout):
+    def run_timeout(self, timeout):
         if time.time() - self.last_heartbeat > timeout:
             if self.state == State.LEADER:
                 self.leader_timeout_protocol()
             else:
+                print('SENT REQUEST RPC BECAUSE TIMEOUT HAS EXPIRED')
+                self.reset_timeout()
                 self.send_request_rpc()
 
 
@@ -126,6 +139,7 @@ class Replica:
         self.send(append_msg)
 
     def receive_append_entry(self, msg):
+        self.reset_timeout()
         if msg['prev_log_index'] == 0 or (msg['prev_log_index'] in self.log.keys() and self.log[msg['prev_log_index']]['term'] == msg['prev_log_term']):
             print('APPEND SUCCESS')
             for log_id in self.log.copy().keys():
@@ -187,6 +201,7 @@ class Replica:
             if len(msg['entries']) > 0:
                 self.receive_append_entry(msg)
         else:
+            print('SENT REQUEST RPC BECAUSE REJECT APPEND ENTRY')
             self.send_request_rpc()
         
        # print("Received message '%s'" % (msg,), flush=True)
@@ -204,10 +219,12 @@ class Replica:
             self.sent_vote_for_term = True
             print("Received message '%s'" % (msg,), flush=True)
         else:
+            print('SENT REQUEST RPC BECAUSE REJECT VOTE')
             self.send_request_rpc()
     
     def receive_vote(self, msg):
         self.votes += 1
+        print('REPLICA ' + str(self.id) + 'HAS THIS MANY VOTES' + str(self.votes))
         if self.votes >= self.majority:
             msg = {'src': self.id, 'dst': 'FFFF', 
                     'leader': self.id,
@@ -220,9 +237,12 @@ class Replica:
             self.votes = 0
             self.curr_leader = self.id
             self.state = State.LEADER
+            self.reset_timeout()
             self.leader_buff = {}
             self.follower_buff = []
             print("Received message '%s'" % (msg,), flush=True)
+            print('REPLICA ' + str(self.id) + 'HAS HIT MAJORITY')
+          
 
     # called when there is a get or put
     def database_transaction(self, msg):
@@ -292,14 +312,14 @@ class Replica:
 
     def run(self):
         self.last_heartbeat = time.time()
+        # timeout = STANDARD_TIMEOUT / 2
+        # if self.state != State.LEADER:
+        #     self.timeout = (random.random() + 1) * STANDARD_TIMEOUT
+
         while True:
 
             # set timeout
-            timeout = STANDARD_TIMEOUT / 2
-            if self.state != State.LEADER:
-                timeout = (random.random() + 1) * STANDARD_TIMEOUT
-
-            self.timeout(timeout)
+            self.run_timeout(self.timeout)
 
             sock = select.select([self.socket], [], [], 0.003)[0]
             for conn in sock:
@@ -324,8 +344,12 @@ class Replica:
                         self.database[self.log[msg['leader_commit']]['key']] = self.log[msg['leader_commit']]['value']
                 
                 elif msg['type'] == 'request_rpc' and not self.sent_vote_for_term: # vote for rpc
+                    # sent_vote_for_term = sent out a request for votes
                     if not self.looking_for_votes:
+                        # true if you have not 
+                        self.reset_timeout()
                         self.send_vote(msg)
+                    
                 
                 elif msg['type'] == 'vote':
                     self.receive_vote(msg)
