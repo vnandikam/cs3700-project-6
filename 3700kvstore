@@ -219,7 +219,7 @@ class Replica:
         msg = {'src': self.id, 'dst': msg['src'], 
                 'leader': 'FFFF',
                 "type": "vote",
-                'term': self.curr_term_number}
+                'term': msg['term']}
         # print('Replica ' + str(self.id) + ' sent ' + str(msg))
         self.reset_timeout()
         self.timeout = 0.5
@@ -288,10 +288,10 @@ class Replica:
                     response = {"src": self.id, "dst": msg['src'], "leader": self.curr_leader, "type": "ok", "MID": mid, 'value': value}
                     # print('Replica ' + str(self.id) + ' sent ' + str(response))
                     self.send(response)
-                else :
-                    response = {"src": self.id, "dst": msg['src'], "leader": self.curr_leader, "type": "fail", "MID": mid}
-                    # print('Replica ' + str(self.id) + ' sent ' + str(response))
-                    self.send(response)
+                # else :
+                #     response = {"src": self.id, "dst": msg['src'], "leader": self.curr_leader, "type": "fail", "MID": mid}
+                #     # print('Replica ' + str(self.id) + ' sent ' + str(response))
+                #     self.send(response)
         
         # send fail because there is no leader
         elif self.state == State.CANDIDATE:
@@ -356,7 +356,7 @@ class Replica:
                 
                 elif msg['type'] == 'request_rpc':
                     if msg['term'] not in self.terms_voted_for:
-                        self.curr_term_number = max(msg['term'], self.curr_term_number)
+                        # self.curr_term_number = max(msg['term'], self.curr_term_number)
                         if msg['term'] >= self.curr_term_number: # and msg['log-length'] >= self.curr_log_idx:
                             self.send_vote(msg)
                         else:
