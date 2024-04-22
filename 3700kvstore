@@ -21,17 +21,19 @@ class Replica:
         self.replica_timeout = 0
         self.leader_timeout = 0
 
-        self.commit_index = 0
-        self.log_index = 0
+        self.commit_index = -1
         self.term = 0
         self.state = State.FOLLOWER
+        self.most_recent_commit = -1
 
         self.leader = BROADCAST
         self.votes = 0
         self.voted_leader = ''
         self.replicas_not_voted = self.others.copy()
-        self.log = {}
+        self.log = []
         self.database = {}
+
+        self.log_buffer = {}
 
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(('localhost', 0))
@@ -43,37 +45,158 @@ class Replica:
 
     def send(self, message):
         self.socket.sendto(json.dumps(message).encode('utf-8'), ('localhost', self.port))
-    
-    
+      
     def reset_replica_timeout(self):
         self.replica_timeout = time.time() + random.randint(STANDARD_TIMEOUT, STANDARD_TIMEOUT*2) / 1000.0
 
-
-    def recv_append_entry(self, msg):
-        self.reset_replica_timeout()
-        self.leader = msg["src"]
-        self.state = State.FOLLOWER
-        self.term = msg['term']
-
-
-    def leader_heartbeat(self, log_index):
-        prev_term_number = -1
-        if (log_index - 1) in self.log.keys():
-            prev_term_number = self.log[log_index - 1]['term']
-
-        append_msg = {'src': self.id, 'dst': BROADCAST,
+    def send_append_response(self, dst, match_response, idx_diff, term_diff, entry_indices):
+        append_msg = {'src': self.id, 
+                      'dst': dst,
                       'leader': self.id, 
-                      'type': "append-entries", 
-                      'leader_commit': self.log_index,
+                      'type': 'append-response', 
                       'term': self.term,
-                      'prev_log_index': self.log_index - 1,
-                      'prev_log_term': prev_term_number,
-                      'entries': [],
-                      'leader_commit_index': self.commit_index
+                      'success': match_response,
+                      'index-difference': idx_diff,
+                      'term-difference': term_diff,
+                      'entries': entry_indices,
+                      'commit_index': self.commit_index
                       }
         
         self.send(append_msg)
 
+# TODO: check logic
+    def update_log(self, matched_index, prev_term, entries):
+
+        # prev_match = False
+        # idx_diff = -1
+        # term_diff = -1
+
+        # if len(self.log) < match_index:
+        #     idx_diff = len(self.log) - 1
+        #     term_diff = self.log[-1]['term']
+        # elif len(self.log) >= match_index:  
+        #     entry = self.log[match_index] 
+        #     if entry['term'] == match_term:
+        #         prev_match = True
+        #         same_log_as_leader = self.log
+        #         if len(self.log) > match_index:
+        #             same_log_as_leader = self.log[:match_index + 1]
+        #         self.log = same_log_as_leader + entries
+        #     else:
+        #         term_diff = match_term
+        #         for index in range(0, len(self.log)):
+        #             entry = self.log[index]
+
+        #             if (entry["term"] == match_term):
+        #                 idx_diff = index
+
+        match = False
+
+        try: # my log is longer or same length as leader's
+            my_same_entry = self.log[matched_index]
+            # same entry in my log as leader's
+            if (my_same_entry["term"] == prev_term):
+                match = True
+                matched_log = self.log[:matched_index + 1]
+                self.log = matched_log + entries
+                conflict_index, conflict_term = -1
+            else: 
+                conflict_term = my_same_entry["term"]
+                conflict_index = self.find_first_of_term(conflict_term)
+        except:
+            my_last_entry = self.log[-1]
+            conflict_index = len(self.log) - 1
+            conflict_term = my_last_entry["term"]
+        
+        return match, conflict_term, conflict_index
+        
+        # return prev_match, idx_diff, term_diff
+
+
+    def recv_append_entry(self, msg):
+
+        entry_indices = [entry['log-index'] for entry in msg['entries']]
+
+        if msg['term'] < self.term:
+            self.send_append_response(msg['src'], False, -1, -1, entry_indices)
+        else:
+            self.reset_replica_timeout()
+            self.leader = msg["src"]
+            self.state = State.FOLLOWER
+            self.term = msg['term']
+
+            if len(msg['entries']) == 0 or len(self.log) == 0:
+                self.send_append_response(msg['src'], True, -1, -1, entry_indices)
+                self.log += msg['entries']
+
+            else:
+                prev_match, idx_diff, term_diff = self.update_log(msg['prev_log_index'], msg['prev_log_term'], msg['entries'])
+                self.send_append_response(msg['src'], prev_match, idx_diff, term_diff, entry_indices)
+                if prev_match and msg['commit_index'] > self.commit_index:
+                    
+                    self.commit_index = min(msg['commit_index'], len(self.log) - 1)
+                    print('NEW COMMIT INDEX' + str(self.commit_index))
+
+    def recv_append_response(self, msg):
+
+        if msg['success']:
+            if len(msg['entries']) == 0:
+                return
+            for entry in msg['entries']:
+                self.log[entry]['follower-commits'] += 1
+                if self.log[entry]['log-index'] >= self.commit_index:
+                    print('CAN BE COMMITED')
+                    self.commit_index += 1
+                    print('LOG ' + str(len(self.log)))
+                    print('COMMIT INDEX ' + str(self.commit_index))
+                    print('MOST RECENT COMMIT' + str(self.most_recent_commit))
+            self.log_buffer[msg['src']] = msg["entries"][-1] + 1
+        else:
+            diff_entry = self.log[msg['index-difference']]
+
+            if (diff_entry['term'] == msg['term-difference']):
+                self.log_buffer[msg['src']] = msg['index-difference']
+            else:
+                prev_term_idx = 0
+                for index in range(0, len(self.log)):
+                    entry = self.log[index]
+
+                    if (entry["term"] == (msg['term-difference'] - 1)):
+                        prev_term_idx = index
+                self.log_buffer[msg['src']] = prev_term_idx
+
+
+    def send_heartbeat(self, dst, entries, prev_idx, prev_term):
+        append_msg = {'src': self.id, 
+                      'dst': dst,
+                      'leader': self.id, 
+                      'type': "append-entries", 
+                      'leader_commit': len(self.log),
+                      'term': self.term,
+                      'prev_log_index': prev_idx,
+                      'prev_log_term': prev_term,
+                      'entries': entries,
+                      'commit_index': self.commit_index
+                      }
+        
+        self.send(append_msg)
+
+    def leader_heartbeat(self):
+
+        print('LEADER HEARTBEAT CALLED')
+
+        for follower, follower_index in self.log_buffer.items():
+            if follower_index == len(self.log):
+                print('REGULAR HEARTBEAT SENT')
+                self.send_heartbeat(follower, [], -1, -1)
+            else:
+                ## if not empty, send the rest
+                entries = self.log[follower_index:]
+                prev_entry = self.log[follower_index - 1]
+                prev_term = prev_entry['term']
+                print('APPEND ENTRIES HEARTBEAT SENT')
+                self.send_heartbeat(follower, entries, follower_index - 1, prev_term)
+            
         self.leader_timeout = time.time() + (STANDARD_TIMEOUT / 2000.0)
 
     def start_election(self):
@@ -93,10 +216,9 @@ class Replica:
             "type": "request_rpc",
             'term': self.term,
             # TODO: include the term of the last log ? and use that to compare to replica's term instead
-            'log-length': self.log_index}
+            'log-length': len(self.log)}
         
         self.send(msg)
-
 
     def persist_request_rpc(self):
         for replica in self.replicas_not_voted:
@@ -117,6 +239,9 @@ class Replica:
                 self.receive_vote(msg)
         elif msg['type'] == 'append-entries':
             self.recv_append_entry(msg)
+        elif msg['type'] == 'append-response':
+            if self.state == State.LEADER:
+                self.recv_append_response(msg)
         elif msg['type'] == 'put':
             self.recv_put(msg)
         elif msg['type'] == 'get':
@@ -124,9 +249,20 @@ class Replica:
 
     def recv_put(self, msg):
         if self.state == State.LEADER:
-            self.database[msg['key']] = msg['value']
-            response = {"src": self.id, "dst": msg['src'], "leader": self.leader, "type": "ok", "MID": msg['MID']}
-            self.send(response)
+            # self.database[msg['key']] = msg['value']
+            # response = {"src": self.id, "dst": msg['src'], "leader": self.leader, "type": "ok", "MID": msg['MID']}
+            # self.send(response)
+            log_entry = {
+                'term': self.term,
+                'MID': msg['MID'],
+                'key': msg['key'],
+                'value': msg['value'],
+                'client': msg['src'],
+                'type': 'put',
+                'log-index': len(self.log),
+                'follower-commits': 1 
+            }
+            self.log.append(log_entry)
         else:
             self.redirect_msg(msg)
 
@@ -135,14 +271,24 @@ class Replica:
             value = self.database.get(msg['key'], '')
             response = {"src": self.id, "dst": msg['src'], "leader": self.leader, "type": "ok", "MID": msg['MID'], 'value': value}
             self.send(response)
+        # elif self.state == State.CANDIDATE:
+        #     self.fail_msg(msg)
         else:
             self.redirect_msg(msg)
+
+    def fail_msg(self, msg):
+        response = {"src": self.id, "dst": msg['src'], "leader": self.leader, "type": "fail", "MID": msg['MID']}
+        self.send(response)
 
     def redirect_msg(self, msg):
         response = {"src": self.id, "dst": msg['src'], "leader": self.leader, "type": "redirect", "MID": msg['MID']}
         self.send(response)
 
-
+    def complete_put_action(self, msg):
+        self.database[msg['key']] = msg['value']
+        if self.state == State.LEADER:
+            response = {"src": self.id, "dst": msg['client'], "leader": self.leader, "type": "ok", "MID": msg['MID']}
+            self.send(response)
 
     def receive_vote(self, msg):
         if msg['should_vote']:
@@ -151,19 +297,18 @@ class Replica:
             if msg['term'] > self.term:
                 self.term = msg['term']
 
+        print('REPLICA ' + str(self.id) + ' HAS THIS MANY VOTES')
         if self.votes >= ((len(self.others) + 1) / 2.0):
+            print('REPLICA ' + str(self.id) + ' HAS HIT MAJORITY')
             self.state = State.LEADER
             self.leader = self.id
             if time.time() >= self.leader_timeout:
-                self.leader_heartbeat(self.log_index)
+                self.leader_heartbeat()
+            for follower in self.others:
+                self.log_buffer[follower] = len(self.log)
             
-
-        
-
     def receive_request_rpc(self, msg):
-
         should_vote = None
-        
 
         if msg['term'] < self.term:
             should_vote = False
@@ -193,6 +338,17 @@ class Replica:
         
         self.send(vote_msg)
 
+    #NOTE: updates the database until the given commit index 
+    def housekeeping(self):
+        print(f'MOST RECENT COMMIT {self.most_recent_commit} COMMIT {self.commit_index}')
+        while(self.most_recent_commit < self.commit_index - 1):
+            
+            self.most_recent_commit +=1
+            print('UPDATED MOST RECENT COMMIT ' + str(self.most_recent_commit))
+            print(f'LOG LENGTH {len(self.log)}')
+            print(f'IS IN LOG {self.log[self.most_recent_commit]}')
+            self.complete_put_action(self.log[self.most_recent_commit])
+            
     def run(self):
         # TODO: CHANGE TO OUR METHOD OF TIMEOUT
         # TODO: see if we can consolidate the two timeouts into one
@@ -207,10 +363,9 @@ class Replica:
 
                 self.process_incoming_message(msg)
             
-            
             if self.state == State.LEADER:
                 if time.time() >= self.leader_timeout:
-                    self.leader_heartbeat(self.log_index)
+                    self.leader_heartbeat()
             else:
                 if time.time() >= self.replica_timeout:
                     self.start_election()
@@ -219,7 +374,7 @@ class Replica:
                 if time.time() >= self.replica_timeout:
                     self.persist_request_rpc()
             
-            # TODO: update database method
+            self.housekeeping()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='run a key-value store')
