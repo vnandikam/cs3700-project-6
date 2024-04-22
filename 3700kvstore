@@ -1,14 +1,24 @@
 #!/usr/bin/env python3
 
-import argparse, socket, time, json, select, struct, sys, math, os
+import argparse, socket, time, json, random, select, struct, sys, math, os
+from enum import Enum
+
+class State(Enum):
+    LEADER  = 0
+    CANDIDATE = 1
+    FOLLOWER = 2
+
 
 BROADCAST = "FFFF"
+STANDARD_TIMEOUT = 0.2
 
 class Replica:
     def __init__(self, port, id, others):
         self.port = port
         self.id = id
         self.others = others
+        self.replica_timeout = 0
+        self.leader_timeout = 0
 
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(('localhost', 0))
@@ -21,12 +31,70 @@ class Replica:
     def send(self, message):
         self.socket.sendto(json.dumps(message).encode('utf-8'), ('localhost', self.port))
 
-    def run(self):
-        while True:
-            data, addr = self.socket.recvfrom(65535)
-            msg = data.decode('utf-8')
+    def leader_heartbeat(self):
+        pass
 
-            print("Received message '%s'" % (msg,), flush=True)
+    def send_append_entry():
+        term_number = self.log[log_index]['term']
+        prev_term_number = -1
+        if (log_index - 1) in self.log.keys():
+            prev_term_number = self.log[log_index - 1]['term']
+            
+        append_msg = {'src': self.id, 'dst': dst,
+                      'leader': self.id, 
+                      'type': "append-entries", 
+                      'leader_commit': log_index,
+                      'term': term_number,
+                      'prev_log_index': log_index - 1,
+                      'prev_log_term': prev_term_number,
+                      'entries': [],
+                      'leader_commit_index': self.curr_commit_index
+                      }
+        
+        # loads up the append entry with appropriate information
+        for leader_commit in self.log.keys():
+            if leader_commit >= log_index:
+                is_committed = True if self.log[leader_commit]['key'] in self.database.keys() else False
+
+                append_msg['entries'].append({
+                    'leader_commit': leader_commit,
+                    'term': self.log[leader_commit]['term'],
+                    'key': self.log[leader_commit]['key'],
+                    'value': self.log[leader_commit]['value'],
+                    'commit': is_committed,
+                    'mid': self.log[leader_commit]['mid'],
+                    'dst': self.log[leader_commit]['dst']
+                })
+        
+        self.send(append_msg)
+
+
+
+
+
+    def run(self):
+        # TODO: CHANGE TO OUR METHOD OF TIMEOUT
+        # TODO: see if we can consolidate the two timeouts into one
+        self.replica_timeout = time.time() + random.randint(STANDARD_TIMEOUT, STANDARD_TIMEOUT*2)
+        
+        while True:
+            connections = select.select([self.socket], [], [], 0.01)[0]
+            for conn in connections:
+                data, addr = self.socket.recvfrom(65535)
+                msg = data.decode('utf-8')
+                print("Received message '%s'" % (msg,), flush=True)
+
+                self.process_incoming_message(msg)
+            
+            
+            if self.state == State.LEADER:
+                if time.time() >= self.leader_heartbeat:
+
+            self.leader_heartbeat()
+            self.expiring_timeout()
+            self.resend_request_rpc()
+            
+            # TODO: update database method
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='run a key-value store')
