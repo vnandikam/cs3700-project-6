@@ -1,13 +1,8 @@
 # cs3700-project-6
-Distributed Key Value Store
 
-key: 8BBM86WJYZLV2SX198O5QL6ZEBUWZL2N
+### High Level Approach:
+The goal of this project was to create a key value data store which implements RAFT protocol in order to keep a consistent distributed store of the database. We implemented a democratic leader elections whenever leader nodes are unresponsive for too long, which means that the whole network will not go down when a leader goes down. The nodes typically vote for the first node who notices the lack of heartbeat message which prompts it to send its own bid for leadership. If the new candidate node is up to date in terms of election_terms and log entries with other nodes, then that node is accepted as the new leader and it sends  heartbeat to switch the other nodes into follower mode. The heartbeat message also has the most updated commit index and log indices so that the follower nodes can check to see if they are updated with the leaders database and logs. Empty append-entries act as the heartbeat, but if the entries list contains an entry, it means that the leader has recieved a put or is getting to follower up to date with its own log and database. The leaders needs to wait for approval from at least half of its followers saying that they have added it to their log in order to commit it to its database. The followers respond back to the leader using append-response messages relaying the state of their own logs and commits in relation to the leaders. If the client sends key value pairs for the leader to add to its databse as a put message and asks for values back as get messages. The client should only interact directly with the leader for the sake of consistency, therefore all follower nodes redirect the message back to the current leader if they do recieve communciation from the client.
 
-original_value: 76e226589aac508107ec7ab510eaa044
 
-value: 3d4cd5588cdcdae343fa4b9821904bf5
-
-[18.6316  Replica 0000]: Replica + 0000 received: {'src': '0019', 'dst': '0000', 'leader': '0000', 'type': 'get', 'MID': 'XO8A68D5UVHA5J65', 'key': '8BBM86WJYZLV2SX198O5QL6ZEBUWZL2N'}
-
-[21.0054  Replica 0000]: Replica + 0000 received: {'src': '0019', 'dst': '0000', 'leader': '0000', 'type': 'put', 'MID': 'J3Q0KDYAZ99HTI9A', 'key': '8BBM86WJYZLV2SX198O5QL6ZEBUWZL2N', 'value': '6f845a95834aabaf9fbf74e9faf3f167'}
-\
+### Takeways 
+This project had a large learning curve on our part as it took a very deep understanding of the Raft protocol. While we had a high level understanding, we would often get tripped up by the minutia and would have to refer back to the raft paper. If we were to repeat this project, we would make sure to reread the Raft paper multiple times so that we would not have run into some of our blocks that really stumped us.

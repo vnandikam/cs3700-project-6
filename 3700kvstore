@@ -3,16 +3,16 @@
 import argparse, socket, time, json, random, select, struct, sys, math, os
 from enum import Enum
 
+BROADCAST = "FFFF"
+STANDARD_TIMEOUT = 200
+
 class State(Enum):
     LEADER  = 0
     CANDIDATE = 1
     FOLLOWER = 2
 
-
-BROADCAST = "FFFF"
-STANDARD_TIMEOUT = 200
-
 class Replica:
+    
     def __init__(self, port, id, others):
         self.port = port
         self.id = id
@@ -44,12 +44,21 @@ class Replica:
         print("Sent hello message: %s" % hello, flush=True)
 
     def send(self, message):
+        '''
+        Sends message to server
+        '''
         self.socket.sendto(json.dumps(message).encode('utf-8'), ('localhost', self.port))
       
     def reset_replica_timeout(self):
+        '''
+        Resets the time out to a random timeout value
+        '''
         self.replica_timeout = time.time() + random.randint(STANDARD_TIMEOUT, STANDARD_TIMEOUT*2) / 1000.0
 
     def send_append_response(self, dst, match_response, idx_diff, term_diff, entry_indices):
+        '''
+        Leader sends back response to append message
+        '''
         append_msg = {'src': self.id, 
                       'dst': dst,
                       'leader': self.id, 
@@ -64,9 +73,8 @@ class Replica:
         
         self.send(append_msg)
 
-# TODO: check logic
     def update_log(self, match_index, match_term, entries):
-
+  
         prev_match = False
         idx_diff = -1
         term_diff = -1
@@ -92,8 +100,10 @@ class Replica:
         
         return prev_match, idx_diff, term_diff
 
-
     def recv_append_entry(self, msg):
+        '''
+        Leader recieves append entry from follower
+        '''
 
         entry_indices = [entry['log-index'] for entry in msg['entries']]
 
@@ -118,6 +128,9 @@ class Replica:
                     print('NEW COMMIT INDEX' + str(self.commit_index))
 
     def recv_append_response(self, msg):
+        '''
+        Follower receives append response from leader. Action determined by response message
+        '''
 
         if msg['success']:
             if len(msg['entries']) == 0:
@@ -141,8 +154,10 @@ class Replica:
                         prev_term_idx = index
                 self.log_buffer[msg['src']] = prev_term_idx
 
-
     def send_heartbeat(self, dst, entries, prev_idx, prev_term):
+        '''
+        Sends a heartbeat to other followers as a leader
+        '''
         append_msg = {'src': self.id, 
                       'dst': dst,
                       'leader': self.id, 
@@ -158,6 +173,11 @@ class Replica:
         self.send(append_msg)
 
     def leader_heartbeat(self):
+        '''
+        recv_heartbeat resets the timeout after a given append entry message
+        Args:
+            msg: an append entry message
+        '''
 
         for follower, follower_index in self.log_buffer.items():
             if follower_index == len(self.log):
@@ -172,13 +192,15 @@ class Replica:
         self.leader_timeout = time.time() + (STANDARD_TIMEOUT / 2000.0)
 
     def start_election(self):
+        '''
+        Sends a heartbeat to other followers as a leader
+        '''
         self.leader = self.id
         self.state = State.CANDIDATE
         self.term += 1
         self.votes += 1
         self.replicas_not_voted = self.others.copy()
-        #TODO: keep track of replicas who voted to make sure there are no duplicates
-        # self.terms_voted_for.add(self.curr_term_number)
+        #self.terms_voted_for.add(self.curr_term_number)
 
         self.reset_replica_timeout()
         self.leader_timeout = time.time() + STANDARD_TIMEOUT/2000.0
@@ -187,22 +209,26 @@ class Replica:
             'leader': self.id,
             "type": "request_rpc",
             'term': self.term,
-            # TODO: include the term of the last log ? and use that to compare to replica's term instead
             'log-length': len(self.log)}
         
         self.send(msg)
 
     def persist_request_rpc(self):
+        '''
+        Send request rpc for replicas who have not sent back votes
+        '''
         for replica in self.replicas_not_voted:
             msg = {'src': self.id, 'dst': replica, 
                     'leader': self.id,
                     "type": "request_rpc",
                     'term': self.term,
-                    # TODO: include the term of the last log ? and use that to compare to replica's term instead
                     'log-length': self.curr_log_idx}
             self.send(msg)
 
     def process_incoming_message(self, msg):
+        '''
+        Determines message type and respective action from replica
+        '''
         if msg['type'] == 'request_rpc':
             self.receive_request_rpc(msg)
         elif msg['type'] == 'vote':
@@ -220,6 +246,9 @@ class Replica:
             self.recv_get(msg)
 
     def recv_put(self, msg):
+        '''
+        appends message to log
+        '''
         if self.state == State.LEADER:
             log_entry = {
                 'term': self.term,
@@ -236,6 +265,9 @@ class Replica:
             self.redirect_msg(msg)
 
     def recv_get(self, msg):
+        '''
+        retrieves a message from log
+        '''
         if self.state == State.LEADER:
             value = self.database.get(msg['key'], '')
             response = {"src": self.id, "dst": msg['src'], "leader": self.leader, "type": "ok", "MID": msg['MID'], 'value': value}
@@ -246,20 +278,32 @@ class Replica:
             self.redirect_msg(msg)
 
     def fail_msg(self, msg):
+        '''
+        Sends a failure message
+        '''
         response = {"src": self.id, "dst": msg['src'], "leader": self.leader, "type": "fail", "MID": msg['MID']}
         self.send(response)
 
     def redirect_msg(self, msg):
+        '''
+        redirects message if this was not the internded replica
+        '''
         response = {"src": self.id, "dst": msg['src'], "leader": self.leader, "type": "redirect", "MID": msg['MID']}
         self.send(response)
 
     def complete_put_action(self, msg):
+        '''
+        Adds message to database
+        '''
         self.database[msg['key']] = msg['value']
         if self.state == State.LEADER:
             response = {"src": self.id, "dst": msg['client'], "leader": self.leader, "type": "ok", "MID": msg['MID']}
             self.send(response)
 
     def receive_vote(self, msg):
+        '''
+        Receives vote and determines if replica can become leader
+        '''
         if msg['should_vote']:
             self.votes += 1
         else:
@@ -275,6 +319,9 @@ class Replica:
                 self.log_buffer[follower] = len(self.log)
             
     def receive_request_rpc(self, msg):
+        '''
+        Receives request_rpc and starts election process
+        '''
         should_vote = None
 
         if msg['term'] < self.term:
@@ -305,16 +352,16 @@ class Replica:
         
         self.send(vote_msg)
 
-    #NOTE: updates the database until the given commit index 
     def housekeeping(self):
+        '''
+        Brings replica up to speed with commits
+        '''
         while(self.most_recent_commit < self.commit_index - 1):
             
             self.most_recent_commit +=1
             self.complete_put_action(self.log[self.most_recent_commit])
             
     def run(self):
-        # TODO: CHANGE TO OUR METHOD OF TIMEOUT
-        # TODO: see if we can consolidate the two timeouts into one
         self.reset_replica_timeout()
 
         while True:
